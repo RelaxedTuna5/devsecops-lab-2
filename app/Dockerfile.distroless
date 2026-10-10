@@ -1,0 +1,30 @@
+# Этап сборки зависимостей
+FROM python:3.13-slim-trixie AS build
+
+WORKDIR /app
+COPY requirements.txt .
+
+# Устанавливаем зависимости в отдельную папку
+RUN pip install --no-cache-dir --target=/app/packages -r requirements.txt
+
+# Финальный distroless образ
+FROM gcr.io/distroless/python3-debian13
+
+# Указываем Python, где искать установленные пакеты
+ENV PYTHONPATH=/app/packages
+
+WORKDIR /app
+
+# Копируем пакеты из сборочного образа
+COPY --from=build /app/packages /app/packages
+
+# Копируем код приложения
+COPY app.py .
+
+# Указываем пользователя явно числом, чтобы избежать root (требование distroless и безопасности)
+USER 10001
+
+EXPOSE 5000
+
+# Запускаем через встроенный entrypoint python3 модуль gunicorn
+CMD ["-m", "gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--access-logfile", "-", "app:app"]

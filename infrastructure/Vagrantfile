@@ -1,0 +1,66 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+VM_IP = "192.168.56.10"
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "ubuntu/jammy64"
+  config.vm.box_url = "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64-vagrant.box"
+  config.vm.box_check_update = false
+  
+  config.vm.hostname = "devsecops-vm"
+  
+  config.vm.network "private_network", ip: VM_IP
+  config.vm.network "forwarded_port", guest: 8080, host: 8080, host_ip: "127.0.0.1"
+  
+  config.vm.provider "virtualbox" do |vb|
+    vb.name = "devsecops-vm"
+    vb.memory = 1024
+    vb.cpus = 1
+  end
+  
+  # Синхронизация каталога с проектом
+  config.vm.synced_folder "..", "/home/vagrant/devsecops-lab"
+  
+  config.vm.provision "shell", name: "docker_and_tools", inline: <<-SHELL
+    set -euo pipefail
+    export DEBIAN_FRONTEND=noninteractive
+    
+    # 1. Установка Docker и утилит
+    if ! command -v docker &> /dev/null; then
+      apt-get update
+      apt-get install -y docker.io docker-buildx curl
+    fi
+    
+    # 2. Настройка прав пользователя (идемпотентно)
+    usermod -aG docker vagrant
+    
+    # 3. Настройка insecure-registries (идемпотентно)
+    mkdir -p /etc/docker
+    if ! grep -q "192.168.56.10:5000" /etc/docker/daemon.json 2>/dev/null; then
+      echo '{ "insecure-registries": ["#{VM_IP}:5000"] }' > /etc/docker/daemon.json
+      systemctl enable docker
+      systemctl restart docker
+    fi
+    
+    # 4. Установка Trivy (идемпотентно, с проверкой хэша)
+    TRIVY_VERSION="0.74.0"
+    if ! command -v trivy &> /dev/null || [ "$(trivy --version | grep -o '0.74.0')" != "0.74.0" ]; then
+      BASE="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+      cd /tmp
+      curl -sSfLO "${BASE}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+      curl -sSfLO "${BASE}/trivy_${TRIVY_VERSION}_checksums.txt"
+      sha256sum --ignore-missing -c "trivy_${TRIVY_VERSION}_checksums.txt"
+      tar -xzf "trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" trivy
+      install -m 0755 trivy /usr/local/bin/trivy
+      rm trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz trivy_${TRIVY_VERSION}_checksums.txt trivy
+    fi
+    
+    # 5. Запуск реестра (идемпотентно)
+    if ! docker ps -a --format '{{.Names}}' | grep -Eq "^registry\$"; then
+      docker run -d --name registry --restart=always -p 5000:5000 -v registry-data:/var/lib/registry registry:3
+    elif ! docker ps --format '{{.Names}}' | grep -Eq "^registry\$"; then
+      docker start registry
+    fi
+  SHELL
+end
